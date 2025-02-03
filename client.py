@@ -5,13 +5,21 @@ import os
 import argparse
 import tkinter as tk
 from tkinter import ttk
-from translate import Translator  # Using the translate library
+from translate import Translator
+from textblob import TextBlob
+from langdetect import detect
+
+# Function to insert emojis into the message input field
+def insert_emoji(textInput, emoji_char):
+    textInput.insert(tk.END, emoji_char)
 
 class Send(threading.Thread):
-    def __init__(self, sock, name):
+    def __init__(self, sock, name, preferred_language):
         super().__init__()
         self.sock = sock
         self.name = name
+        self.preferred_language = preferred_language
+        self.translator = Translator(from_lang=preferred_language, to_lang='en')
 
     def run(self):
         while True:
@@ -20,15 +28,21 @@ class Send(threading.Thread):
             message = sys.stdin.readline()[:-1]
 
             if message == "QUIT":
-                self.sock.sendall('Server: {} has left the Chat.'.format(self.name).encode('ascii'))
+                self.sock.sendall('Server: {} has left the Chat.'.format(self.name).encode('utf-8'))
                 break
             else:
-                self.sock.sendall('{}: {}'.format(self.name, message).encode('ascii'))
+                try:
+                    translated_message = (
+                        self.translator.translate(message) if self.preferred_language != 'en' else message
+                    )
+                    self.sock.sendall('{}: {}'.format(self.name, translated_message).encode('utf-8'))
+                except Exception as e:
+                    print(f"Translation error: {e}")
+                    self.sock.sendall('{}: {}'.format(self.name, message).encode('utf-8'))
 
         print('\nQuitting...')
         self.sock.close()
         os._exit(0)
-
 
 class Receive(threading.Thread):
     def __init__(self, sock, name, messages, preferred_language):
@@ -37,35 +51,34 @@ class Receive(threading.Thread):
         self.name = name
         self.messages = messages
         self.preferred_language = preferred_language
-        self.translator = Translator(to_lang=preferred_language)  # Initialize translator
+        self.translator = Translator(to_lang=preferred_language)
 
     def run(self):
         while True:
-            message = self.sock.recv(1024).decode('ascii')
+            message = self.sock.recv(1024).decode('utf-8')
             if message:
-                # Translate the message to the preferred language
-                if self.preferred_language != 'en':  # Skip translation if English
-                    try:
-                        translated_message = self.translator.translate(message)
-                    except Exception as e:
-                        print(f"Translation error: {e}")
-                        translated_message = message  # Fallback to original message
-                else:
-                    translated_message = message
+                try:
+                    sender_name, original_message = message.split(': ', 1)
+                    translated_message = (
+                        self.translator.translate(original_message) if self.preferred_language != 'en' else original_message
+                    )
 
-                # Display the translated message
-                if self.messages:
-                    self.messages.insert(tk.END, translated_message)
-                    print("hi")
-                    print('\r{}\n{}: '.format(translated_message, self.name), end='')
-                else:
-                    print('\r{}\n{}: '.format(translated_message, self.name), end='')
+                    sentiment = TextBlob(original_message).sentiment
+                    sentiment_text = f"Sentiment: Polarity={sentiment.polarity}, Subjectivity={sentiment.subjectivity}"
+
+                    if self.messages:
+                        self.messages.insert(tk.END, f"{sender_name}: {translated_message}")
+                        self.messages.insert(tk.END, sentiment_text)
+                        print('\r{}\n{}: '.format(translated_message, self.name), end='')
+                    else:
+                        print('\r{}\n{}: '.format(translated_message, self.name), end='')
+
+                except Exception as e:
+                    print(f"Error processing message: {e}")
             else:
-                print('\n No. We have lost connection to the server!')
-                print('\n Quitting...')
+                print('\nConnection lost to the server! Exiting...')
                 self.sock.close()
                 os._exit(0)
-
 
 class Client:
     def __init__(self, host, port):
@@ -74,81 +87,60 @@ class Client:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.name = None
         self.messages = None
-        self.preferred_language = 'en'  # Default language is English
+        self.preferred_language = 'en'
 
     def start(self):
-        print('trying to connect to {}:{}...'.format(self.host, self.port))
-
+        print('Trying to connect to {}:{}...'.format(self.host, self.port))
         self.sock.connect((self.host, self.port))
+        print('Connected to {}:{}'.format(self.host, self.port))
 
-        print('succesffully connected to {}:{}'.format(self.host, self.port))
+        self.name = input('Your Name: ')
+        print('Welcome, {}! Ready to chat...'.format(self.name))
 
-        print()
-
-        self.name = input('your Name: ')
-
-        print()
-
-        print('Welcome, {}! Getting ready to send and receive messages... '.format(self.name))
-
-        # Create send and receive threads
-        send = Send(self.sock, self.name)
+        send = Send(self.sock, self.name, self.preferred_language)
         receive = Receive(self.sock, self.name, self.messages, self.preferred_language)
 
-        # Start send and receive thread
         send.start()
         receive.start()
 
-        self.sock.sendall('Server: {} has joined the chat. Say whatsup!'.format(self.name).encode('ascii'))
-
-        print("\rReady! Leave the chat room anytime by typing 'QUIT'\n")
+        self.sock.sendall('Server: {} has joined the chat.'.format(self.name).encode('utf-8'))
+        print("\rReady! Type 'QUIT' to leave.\n")
         print('{}: '.format(self.name), end='')
         return receive
 
     def send(self, textInput):
-        # Send textInput data from GUI
         message = textInput.get()
         textInput.delete(0, tk.END)
         self.messages.insert(tk.END, '{}: {}'.format(self.name, message))
 
-        # Type 'QUIT' to leave chatroom
         if message == "QUIT":
-            self.sock.sendall('Server: {} has left the chat.'.format(self.name).encode('ascii'))
-            print('\n Quitting...')
+            self.sock.sendall('Server: {} has left the chat.'.format(self.name).encode('utf-8'))
+            print('\nQuitting...')
             self.sock.close()
             os._exit(0)
 
-        # Send message to the server for broadcasting
         else:
-            self.sock.sendall('{}: {}'.format(self.name, message).encode('ascii'))
-
+            send = Send(self.sock, self.name, self.preferred_language)
+            send.translator = Translator(from_lang=self.preferred_language, to_lang='en')
+            translated_message = send.translator.translate(message)
+            self.sock.sendall('{}: {}'.format(self.name, translated_message).encode('utf-8'))
 
 def main(host, port):
-    # Initialize and run GUI application
     client = Client(host, port)
     receive = client.start()
 
+    # GUI Setup
     window = tk.Tk()
     window.title("Chat+")
+    window.geometry("600x500")  # Restored larger window size
 
-    # Language selection dropdown
-    languages = {
-        'English': 'en',
-        'Spanish': 'es',
-        'French': 'fr',
-        'German': 'de',
-        'Chinese (Simplified)': 'zh',
-        'Hindi': 'hi',
-        'Japanese': 'ja',
-    }
-
-    selected_language = tk.StringVar(value='English')  # Default language
+    languages = {'English': 'en', 'Spanish': 'es', 'French': 'fr', 'German': 'de', 'Hindi': 'hi', 'Japanese': 'ja'}
+    selected_language = tk.StringVar(value='English')
 
     def set_language(*args):
         client.preferred_language = languages[selected_language.get()]
         receive.preferred_language = client.preferred_language
-        receive.translator = Translator(to_lang=client.preferred_language)  # Update translator
-        print(f"Preferred language set to: {selected_language.get()}")
+        receive.translator = Translator(to_lang=client.preferred_language)
 
     language_menu = ttk.Combobox(window, textvariable=selected_language, values=list(languages.keys()))
     language_menu.bind("<<ComboboxSelected>>", set_language)
@@ -156,39 +148,38 @@ def main(host, port):
 
     fromMessage = tk.Frame(master=window)
     scrollBar = tk.Scrollbar(master=fromMessage)
-    messages = tk.Listbox(master=fromMessage, yscrollcommand=scrollBar.set)
-    scrollBar.pack(side=tk.RIGHT, fill=tk.Y, expand=False)
-    messages.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    messages = tk.Listbox(master=fromMessage, yscrollcommand=scrollBar.set, height=20, width=70)  # Enlarged message box
+    scrollBar.pack(side=tk.RIGHT, fill=tk.Y)
+    messages.pack(side=tk.LEFT, fill=tk.BOTH)
 
     client.messages = messages
     receive.messages = messages
 
-    fromMessage.grid(row=1, column=0, columnspan=3, sticky="nsew")
+    fromMessage.grid(row=1, column=0, columnspan=3, sticky="nsew", padx=10, pady=10)
+
     fromEntry = tk.Frame(master=window)
-    textInput = tk.Entry(master=fromEntry)
-    textInput.pack(fill=tk.BOTH, expand=True)
+    textInput = ttk.Entry(master=fromEntry, width=50)  # Increased text input width
+    textInput.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
     textInput.bind("<Return>", lambda x: client.send(textInput))
-    textInput.insert(0, "Write your message here.")
+    textInput.insert(0, "Type your message...")
 
-    btnSend = tk.Button(
-        master=window,
-        text='send',
-        command=lambda: client.send(textInput)
-    )
+    btnSend = ttk.Button(master=window, text='Send', command=lambda: client.send(textInput))
 
-    fromEntry.grid(row=2, column=0, padx=10, sticky="ew")
-    btnSend.grid(row=2, column=1, padx=10, sticky="ew")
+    fromEntry.grid(row=2, column=0, padx=10, sticky="ew", pady=5)
+    btnSend.grid(row=2, column=1, padx=10, sticky="ew", pady=5)
 
-    window.rowconfigure(1, minsize=500, weight=1)
-    window.rowconfigure(2, minsize=50, weight=0)
-    window.columnconfigure(0, minsize=500, weight=1)
-    window.columnconfigure(1, minsize=200, weight=0)
+    emoji_frame = tk.Frame(master=window)
+    emoji_frame.grid(row=2, column=2, padx=10, pady=5, sticky="ew")
+
+    emoji_buttons = ["😀", "😍", "👍", "👋"]
+    for i, emoji_char in enumerate(emoji_buttons):
+        btn = tk.Button(master=emoji_frame, text=emoji_char, command=lambda e=emoji_char: insert_emoji(textInput, e))
+        btn.grid(row=0, column=i, padx=2, pady=2)
 
     window.mainloop()
 
-
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="chatroom server")
+    parser = argparse.ArgumentParser(description="Chatroom Client")
     parser.add_argument('host', help='Interface the server listens at')
     parser.add_argument('-p', metavar='PORT', type=int, default=1060, help='TCP port (default 1060)')
 
